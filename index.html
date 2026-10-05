@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>HandTrack — Real-time Hand Tracking</title>
+<style>
+:root{color-scheme:dark;--bg:#080b12;--panel:#111725;--line:#273248;--muted:#95a3ba;--text:#f5f7fb;--accent:#5eead4}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+main{max-width:1100px;margin:auto;padding:16px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px}.title{font-size:22px;font-weight:700}.sub{font-size:12px;color:var(--muted)}
+button{border:1px solid var(--line);background:#182033;color:var(--text);border-radius:10px;padding:10px 14px;font-weight:600}
+button:disabled{opacity:.5}
+.grid{display:grid;grid-template-columns:1.6fr .9fr;gap:12px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.stage{position:relative;aspect-ratio:16/9;background:#05070b}.stage video,.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.stage canvas{transform:scaleX(-1)}
+.overlay{position:absolute;left:10px;top:10px;background:rgba(0,0,0,.55);padding:8px;border-radius:10px;font-size:12px;line-height:1.5}
+.controls{display:flex;flex-wrap:wrap;gap:8px;padding:10px}.stats{padding:14px}.row{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding:9px 0;font-size:14px}.row:last-child{border-bottom:0}.v{font-variant-numeric:tabular-nums}.status{margin-top:10px;color:var(--accent);font-size:13px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}.stage{aspect-ratio:3/4}}
+</style>
+</head>
+<body>
+<main>
+<div class="top"><div><div class="title">🤚 HandTrack</div><div class="sub">Real-time 21-landmark hand tracking • on-device browser inference</div></div><div><button id="start">Start camera</button></div></div>
+<div class="grid">
+<section class="card">
+<div class="stage"><video id="video" autoplay playsinline muted></video><canvas id="canvas"></canvas><div class="overlay" id="overlay">Camera: off<br>Hands: 0</div></div>
+<div class="controls"><button id="snap" disabled>Save snapshot</button><button id="front">Front camera</button><button id="rear">Rear camera</button></div>
+</section>
+<section class="card"><div class="stats">
+<div class="row"><span>Status</span><span class="v" id="status">Idle</span></div>
+<div class="row"><span>FPS</span><span class="v" id="fps">0</span></div>
+<div class="row"><span>Inference</span><span class="v" id="infer">0 ms</span></div>
+<div class="row"><span>Hands detected</span><span class="v" id="hands">0</span></div>
+<div class="row"><span>Gesture</span><span class="v" id="gesture">—</span></div>
+<div class="row"><span>Index fingertip</span><span class="v" id="index">—</span></div>
+<div class="row"><span>Tracking</span><span class="v" id="track">Ready</span></div>
+<div class="status" id="msg">Tap “Start camera”, then allow camera access.</div>
+</div></section>
+</div>
+</main>
+<script type="module">
+import {HandLandmarker,FilesetResolver,DrawingUtils} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22";
+const video=document.getElementById("video"),canvas=document.getElementById("canvas"),ctx=canvas.getContext("2d");
+const start=document.getElementById("start"),snap=document.getElementById("snap");
+const statusEl=document.getElementById("status"),fpsEl=document.getElementById("fps"),inferEl=document.getElementById("infer"),handsEl=document.getElementById("hands"),gestureEl=document.getElementById("gesture"),indexEl=document.getElementById("index"),trackEl=document.getElementById("track"),msg=document.getElementById("msg"),overlay=document.getElementById("overlay");
+let landmarker,stream,running=false,lastT=0,frames=0,fpsT=performance.now(),cameraMode="user",draw;
+async function makeLandmarker(){
+ const fileset=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm");
+ landmarker=await HandLandmarker.createFromOptions(fileset,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:"GPU"},runningMode:"VIDEO",numHands:2,minHandDetectionConfidence:.55,minHandPresenceConfidence:.55,minTrackingConfidence:.55});
+ draw=new DrawingUtils(ctx);
+}
+async function openCamera(){
+ try{
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:cameraMode,width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream; await video.play(); canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+  running=true; snap.disabled=false; start.textContent="Stop camera"; statusEl.textContent="Running"; msg.textContent="Tracking locally in your browser.";
+  requestAnimationFrame(loop);
+ }catch(e){statusEl.textContent="Camera error";msg.textContent=e.name+": "+e.message;running=false}
+}
+function stopCamera(){running=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;start.textContent="Start camera";statusEl.textContent="Idle";handsEl.textContent="0";gestureEl.textContent="—";overlay.innerHTML="Camera: off<br>Hands: 0";}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z)}
+function gesture(l){
+ if(!l)return "—";
+ const wrist=l[0], tips=[8,12,16,20], pips=[6,10,14,18];
+ const ext=tips.map((t,i)=>dist(l[t],wrist)>dist(l[pips[i]],wrist)*1.08);
+ const pinch=dist(l[4],l[8])<.055;
+ const n=ext.filter(Boolean).length;
+ if(pinch)return "Pinch";
+ if(n===5)return "Open palm";
+ if(n===0)return "Fist";
+ if(ext[0]&&!ext[1]&&!ext[2]&&!ext[3])return "Pointing";
+ if(ext[0]&&ext[1]&&!ext[2]&&!ext[3])return "Two fingers";
+ return "Mixed";
+}
+function loop(t){
+ if(!running||video.readyState<2)return requestAnimationFrame(loop);
+ const st=performance.now();
+ const r=landmarker.detectForVideo(video,t);
+ const ms=performance.now()-st;
+ inferEl.textContent=ms.toFixed(1)+" ms"; handsEl.textContent=r.landmarks.length; overlay.innerHTML="Camera: on<br>Hands: "+r.landmarks.length;
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+ for(let i=0;i<r.landmarks.length;i++){
+   draw.drawConnectors(r.landmarks[i],HandLandmarker.HAND_CONNECTIONS,{lineWidth:3});
+   draw.drawLandmarks(r.landmarks[i],{radius:4,lineWidth:1});
+ }
+ const l=r.landmarks[0]; gestureEl.textContent=gesture(l);
+ if(l){const p=l[8]; indexEl.textContent=(p.x*100).toFixed(1)+"%, "+(p.y*100).toFixed(1)+"%"; trackEl.textContent="Locked"}
+ else{indexEl.textContent="—";trackEl.textContent="Searching"}
+ frames++; if(t-fpsT>=1000){fpsEl.textContent=frames;frames=0;fpsT=t}
+ requestAnimationFrame(loop);
+}
+start.onclick=()=>running?stopCamera():openCamera();
+document.getElementById("front").onclick=()=>{cameraMode="user";if(running)openCamera()};
+document.getElementById("rear").onclick=()=>{cameraMode="environment";if(running)openCamera()};
+snap.onclick=()=>{const a=document.createElement("a");a.download="handtrack-"+Date.now()+".png";a.href=canvas.toDataURL("image/png");a.click()};
+window.addEventListener("beforeunload",stopCamera);
+</script>
+</body>
+</html>
